@@ -1,0 +1,63 @@
+import org.springframework.data.redis.connection.RedisConnection
+import org.springframework.data.redis.core.RedisTemplate
+import org.springframework.data.redis.core.ScanOptions
+import org.springframework.data.redis.serializer.RedisSerializer
+import org.springframework.scheduling.annotation.Async
+import org.springframework.stereotype.Component
+
+@Component
+class RedisKeyDeletionService(
+    private val redisTemplate: RedisTemplate<String, String>
+) {
+
+    private val batchSize = 1000
+    private val pattern = "myapp:*"
+
+    @Async
+    fun deleteRedisKeys() {
+        redisTemplate.executeWithStickyConnection { connection ->
+            var cursor = "0"
+            var count = 0
+
+            while (cursor != "0") {
+                cursor = scanKeys(connection, cursor) // call the scanKeys method
+                val keys = readKeys(connection) // call the readKeys method
+
+                if (keys.isNotEmpty()) {
+                    deleteKeys(connection, keys) // call the deleteKeys method
+                    count += keys.size
+
+                    if (count % batchSize == 0) {
+                        System.gc()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun scanKeys(connection: RedisConnection, cursor: String): String {
+        val scanOptions = ScanOptions.scanOptions().match(pattern).count(batchSize.toLong()).build()
+        return connection.scan(scanOptions, cursor).stringCursor()
+    }
+
+    private fun readKeys(connection: RedisConnection): List<String> {
+        val serializer = redisTemplate.valueSerializer as RedisSerializer<Any>
+        val keys = mutableListOf<String>()
+
+        while (connection.isPipelined || connection.isOpen) {
+            val keyBytes = connection.closePipeline().get() as ByteArray?
+            if (keyBytes != null) {
+                val key = serializer.deserialize(keyBytes) as String
+                keys.add(key)
+            } else {
+                break
+            }
+        }
+
+        return keys
+    }
+
+    private fun deleteKeys(connection: RedisConnection, keys: List<String>) {
+        connection.unlink(*keys.toTypedArray())
+    }
+}
